@@ -1,50 +1,108 @@
-### Setup
+# Job Fetcher — Discord Hourly Digest
 
+Scrapes LinkedIn jobs and posts **new** listings to your Discord channel **every hour**, running entirely in the cloud via **GitHub Actions**. No laptop, no terminal, no always-on bot.
 
-```bash
-git clone https://github.com/haydenthai/Linkedin-Discord-Job-Scraper-Bot.git #clone it
+## How it works
+
 ```
-Use python version 3.11.6
+GitHub Actions (every hour)
+        ↓
+  post_jobs.py runs ~2 min
+        ↓
+  Scrapes recent LinkedIn jobs
+        ↓
+  Skips anything already posted before
+        ↓
+  Posts only new jobs to Discord (or stays silent if none)
+        ↓
+  Shuts down
+```
 
-(this was intended to bet setup on a mac, setup might look different on windows)
+Your phone/laptop Discord apps receive the posts like any normal message. Tap the role title or **Apply** link to open the listing.
 
-```bash
-brew install pyenv
-pyenv install 3.11.6
-pyenv shell 3.11.6 #set the current shell to version 3.11.6
-python3 -m venv venv
-source venv/bin/activate
+**No duplicates:** every job ID is saved in `posted_jobs.json` (cached between runs). The same listing will never be posted twice.
+
+## One-time setup
+
+### 1. Discord bot
+
+1. Create a server (or use an existing one).
+2. Go to the [Discord Developer Portal](https://discord.com/developers/applications) → **New Application**.
+3. Under **Installation**, enable **Guild Install**, add the bot scope, grant **Send Messages** + **Embed Links**.
+4. Install the bot into your server using the generated link.
+5. **Bot** tab → **Reset Token** → copy the token (you'll add this as a GitHub secret).
+6. Right-click your target channel → **Copy Channel ID** (enable Developer Mode under User Settings → Advanced if needed).
+
+### 2. Push to GitHub
+
+Push this repo to GitHub (public repo = unlimited free Actions minutes).
+
+### 3. Add GitHub secrets
+
+In your repo: **Settings → Secrets and variables → Actions → New repository secret**
+
+| Secret | Value |
+|---|---|
+| `TOKEN` | Your Discord bot token |
+| `JOBS_CHANNEL_ID` | Your Discord channel ID |
+
+### 4. Optional variables
+
+**Settings → Secrets and variables → Actions → Variables** (defaults are fine if you skip these):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SEARCH_TERMS` | `Software Engineer\|Software Developer\|...` | Pipe-separated LinkedIn search queries |
+| `SEARCH_LOCATIONS` | `Hyderabad, India\|Bangalore, India\|India` | Pipe-separated locations |
+| `TITLE_KEYWORDS` | (same as search terms) | Only post jobs whose title matches one of these |
+| `RESULTS_WANTED` | `50` | Max new jobs per run |
+| `HOURS_OLD` | `2` | Only scrape listings from the last N hours |
+
+### 5. Test it
+
+Go to **Actions → Hourly Job Digest → Run workflow**. Jobs should appear in Discord within a couple of minutes.
+
+After that, it runs automatically **every hour**.
+
+## What gets posted
+
+Each job is a compact embed:
+
+- **Role title** (clickable → job URL)
+- **Company name**
+- **Job ID**
+- **Posted** (e.g. `3 hrs ago`)
+- **Apply** link
+
+If an hourly run finds no new jobs, **nothing is posted** to Discord (no spam).
+
+## Local testing (optional)
+
+```powershell
+python -m venv venv
+.\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-cp .env.example .env
+copy .env.example .env
+# fill in TOKEN and JOBS_CHANNEL_ID
+python post_jobs.py
 ```
 
-### Discord setup
+## Changing the schedule
 
-1. Create a new server in discord
-2. Go to discord developer portal and create a New Application https://discord.com/developers/applications
-3. In the `Installation` tab, check `Guild Install`, in default setting at the bottom `add the bot to the scope` and in permissions add `administrator`(it could probably be scoped down to have less permissions but since you're the owner it's fine)
-4. Copy the discord provided link into your browser and install into your server, you should see in your arrivals channel that the bot got added(if you just created the server it should be in general)
-5. Go into the `Bot` tab and click `Reset Token` copy the token and paste it to the .env
-6. In your discord server, right click the channel and at the bottom you should see a button that says `Copy Channel ID`, grab it and paste them into your .env
-   - if you don't see the option at the bottom it's likely because you need to `Enable Developer Mode` in discord.
-   - You can achieve this by click the gear icon at the bottom left(User Settings) and then click on `Advanced` and enable `Developer Mode`
+Edit `.github/workflows/hourly-jobs.yml`:
 
-## Run it
-
-You're ready to go, run it
-
-```bash
-python bot.py
+```yaml
+schedule:
+  - cron: "0 * * * *"   # every hour at :00 UTC
 ```
 
-You can also run it as a process in the background by running
+Use [crontab.guru](https://crontab.guru) to customize. GitHub cron always uses **UTC**.
 
-```
-nohup python bot.py
-```
+## Cost
 
-> Nohup, short for no hang up is a command in Linux systems that keep processes running even after exiting the shell or terminal. Nohup prevents the processes or jobs from receiving the SIGHUP (Signal Hang UP) signal. This is a signal that is sent to a process upon closing or exiting the terminal.
+- **Public repo**: free (~2 min × 24 runs ≈ 48 min/day).
+- **Private repo**: 2,000 free minutes/month — hourly uses ~1,440 min/month.
 
-### Quick Shoutout
+## Quick Shoutout
 
-This repo uses [JobSpy library](https://github.com/Bunsly/JobSpy), a Jobs scraper library for LinkedIn, Indeed, Glassdoor, Google & ZipRecruiter, made possible by [@cullenwatson](https://github.com/cullenwatson) and the talented engineers at [Bunsly](https://github.com/Bunsly) so go show some love and give them a follow
+This repo uses [JobSpy](https://github.com/Bunsly/JobSpy), a jobs scraper library for LinkedIn, Indeed, Glassdoor, Google & ZipRecruiter, made possible by [@cullenwatson](https://github.com/cullenwatson) and the talented engineers at [Bunsly](https://github.com/Bunsly).

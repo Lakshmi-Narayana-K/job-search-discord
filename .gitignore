@@ -3,3 +3,6 @@ venv
 discord.log
 jobs.db
 jobs.db-journal
+posted_jobs.json
+__pycache__/
+*.pyc

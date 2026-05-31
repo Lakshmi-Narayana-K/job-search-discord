@@ -1,0 +1,36 @@
+name: Hourly Job Digest
+
+on:
+  schedule:
+    # Every hour at :00 UTC
+    - cron: "0 * * * *"
+  workflow_dispatch:
+
+jobs:
+  post-jobs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: posted_jobs.json
+          key: posted-jobs-v1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Post new jobs to Discord
+        env:
+          TOKEN: ${{ secrets.TOKEN }}
+          JOBS_CHANNEL_ID: ${{ secrets.JOBS_CHANNEL_ID }}
+          SEARCH_TERMS: ${{ vars.SEARCH_TERMS }}
+          SEARCH_LOCATIONS: ${{ vars.SEARCH_LOCATIONS }}
+          TITLE_KEYWORDS: ${{ vars.TITLE_KEYWORDS }}
+          RESULTS_WANTED: ${{ vars.RESULTS_WANTED }}
+          HOURS_OLD: ${{ vars.HOURS_OLD }}
+        run: python post_jobs.py
