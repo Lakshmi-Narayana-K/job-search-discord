@@ -1,11 +1,11 @@
-# Job Fetcher — Discord Hourly Digest
+# Job Fetcher — Discord Job Digest
 
-Scrapes LinkedIn jobs and posts **new** listings to your Discord channel **every hour**, running entirely in the cloud via **GitHub Actions**. No laptop, no terminal, no always-on bot.
+Scrapes LinkedIn jobs and posts **new** listings to your Discord channel **every 6 hours**, running entirely in the cloud via **GitHub Actions**. No laptop, no terminal, no always-on bot.
 
 ## How it works
 
 ```
-GitHub Actions (every hour)
+GitHub Actions (every 6 hours)
         ↓
   post_jobs.py runs ~2 min
         ↓
@@ -56,13 +56,13 @@ In your repo: **Settings → Secrets and variables → Actions → New repositor
 | `SEARCH_LOCATIONS` | `Hyderabad, India\|Bangalore, India\|India` | Pipe-separated locations |
 | `TITLE_KEYWORDS` | (same as search terms) | Only post jobs whose title matches one of these |
 | `RESULTS_WANTED` | `50` | Max new jobs per run |
-| `HOURS_OLD` | `2` | Only scrape listings from the last N hours |
+| `HOURS_OLD` | `6` | Only scrape listings from the last N hours |
 
 ### 5. Test it
 
-Go to **Actions → Hourly Job Digest → Run workflow**. Jobs should appear in Discord within a couple of minutes.
+Go to **Actions → Job Digest → Run workflow**. Jobs should appear in Discord within a couple of minutes.
 
-After that, it runs automatically **every hour**.
+After that, it runs automatically **every 6 hours**.
 
 ## What gets posted
 
@@ -74,7 +74,7 @@ Each job is a compact embed:
 - **Posted** (e.g. `3 hrs ago`)
 - **Apply** link
 
-If an hourly run finds no new jobs, **nothing is posted** to Discord (no spam).
+If a scheduled run finds no new jobs, **nothing is posted** to Discord (no spam).
 
 ## Local testing (optional)
 
@@ -93,15 +93,15 @@ Edit `.github/workflows/hourly-jobs.yml`:
 
 ```yaml
 schedule:
-  - cron: "0 * * * *"   # every hour at :00 UTC
+  - cron: "0 */6 * * *"   # every 6 hours at :00 UTC
 ```
 
 Use [crontab.guru](https://crontab.guru) to customize. GitHub cron always uses **UTC**.
 
 ## Cost
 
-- **Public repo**: free (~2 min × 24 runs ≈ 48 min/day).
-- **Private repo**: 2,000 free minutes/month — hourly uses ~1,440 min/month.
+- **Public repo**: free (~2 min × 4 runs/day ≈ 8 min/day).
+- **Private repo**: 2,000 free minutes/month — 6-hourly schedule uses ~240 min/month.
 
 ## Quick Shoutout
 

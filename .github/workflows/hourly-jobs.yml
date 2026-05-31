@@ -1,9 +1,9 @@
-name: Hourly Job Digest
+name: Job Digest
 
 on:
   schedule:
-    # Every hour at :00 UTC
-    - cron: "0 * * * *"
+    # Every 6 hours at :00 UTC (00:00, 06:00, 12:00, 18:00)
+    - cron: "0 */6 * * *"
   workflow_dispatch:
 
 jobs:

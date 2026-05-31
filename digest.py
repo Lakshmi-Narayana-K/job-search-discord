@@ -107,7 +107,7 @@ def _config() -> dict:
         "search_locations": search_locations,
         "title_keywords": [kw.lower() for kw in title_keywords],
         "results_wanted": _parse_int("RESULTS_WANTED", 50),
-        "hours_old": _parse_int("HOURS_OLD", 2),
+        "hours_old": _parse_int("HOURS_OLD", 6),
     }
 
 
