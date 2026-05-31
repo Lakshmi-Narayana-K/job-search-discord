@@ -60,13 +60,22 @@ See previous sections for Discord bot + GitHub secrets (`TOKEN`, `JOBS_CHANNEL_I
 
 ## What gets posted
 
-Each embed shows:
+**One clean Discord message** per run — not dozens of separate posts.
 
-- **Source** (LinkedIn, Naukri, LinkedIn Post, etc.)
-- **Role title** (clickable)
-- **Company**
-- **Posted** time
-- **Apply** link (direct company URL when available)
+```
+📋 New Job Digest
+   12 new roles · Hyderabad, Bangalore · last 6h
+
+💼 LinkedIn · 5 listings
+   01. Software Engineer — Amazon
+       └ Apply link · 2 hrs ago
+
+🔎 Indeed · 4 listings
+   06. Full Stack Developer — Flipkart
+       └ Apply link · 4 hrs ago
+```
+
+Each job title is clickable. Jobs are grouped by source with numbered entries.
 
 ## Local test
 

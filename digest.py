@@ -41,6 +41,42 @@ SITE_LABELS = {
     "linkedin_post": "LinkedIn Post",
 }
 
+SOURCE_EMOJI = {
+    "linkedin": "💼",
+    "indeed": "🔎",
+    "naukri": "🇮🇳",
+    "glassdoor": "🌐",
+    "google": "🔍",
+    "zip_recruiter": "⚡",
+    "bayt": "🌍",
+    "linkedin_post": "📢",
+}
+
+SOURCE_COLORS = {
+    "linkedin": 0x0A66C2,
+    "indeed": 0x2164F3,
+    "naukri": 0x4A90E2,
+    "glassdoor": 0x0CAA41,
+    "google": 0x4285F4,
+    "zip_recruiter": 0x6B46C1,
+    "bayt": 0xE67E22,
+    "linkedin_post": 0x0A66C2,
+}
+
+SITE_ORDER = [
+    "linkedin",
+    "naukri",
+    "indeed",
+    "linkedin_post",
+    "google",
+    "glassdoor",
+    "zip_recruiter",
+    "bayt",
+]
+
+MAX_EMBED_DESCRIPTION = 3900
+MAX_EMBEDS_PER_MESSAGE = 10
+
 blacklist_companies = {
     "Team Remotely Inc",
     "HireMeFast LLC",
@@ -213,29 +249,117 @@ def _dedup_key(row) -> str:
     return ""
 
 
-def _job_embed(row, hours_label: str) -> dict:
-    title = str(row.get("title", "Unknown role"))[:256]
-    company = str(row.get("company", "Unknown company"))[:256]
-    job_url = _best_url(row)
-    job_id = str(row.get("id", "N/A"))[:256]
-    source = _site_label(row)
+def _truncate(text: str, max_len: int) -> str:
+    text = str(text).strip()
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1] + "…"
 
-    embed = {
-        "title": title,
-        "color": 0x0A66C2 if source.startswith("LinkedIn") else 0x5865F2,
-        "fields": [
-            {"name": "Source", "value": source, "inline": True},
-            {"name": "Company", "value": company, "inline": True},
-            {"name": "Posted", "value": hours_label, "inline": True},
-        ],
-    }
-    if job_id and job_id != "N/A":
-        embed["fields"].insert(2, {"name": "Job ID", "value": job_id, "inline": True})
-    if job_url:
-        embed["url"] = job_url
-        link_label = "Open post" if source == "LinkedIn Post" else "Open listing"
-        embed["fields"].append({"name": "Apply", "value": f"[{link_label}]({job_url})", "inline": False})
-    return embed
+
+def _format_job_line(index: int, row, hours_label: str) -> str:
+    title = _truncate(row.get("title", "Unknown role"), 70)
+    company = _truncate(row.get("company", "—"), 36)
+    url = _best_url(row)
+    source = _site_label(row)
+    title_md = f"[**{title}**]({url})" if url else f"**{title}**"
+    return (
+        f"**{index:02d}.** {title_md}\n"
+        f"└ `{company}` · {source} · *{hours_label}*"
+    )
+
+
+def _split_blocks(blocks: list[str], max_len: int) -> list[str]:
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+
+    for block in blocks:
+        block_len = len(block) + (2 if current else 0)
+        if current and current_len + block_len > max_len:
+            chunks.append("\n\n".join(current))
+            current = [block]
+            current_len = len(block)
+        else:
+            current.append(block)
+            current_len += block_len
+
+    if current:
+        chunks.append("\n\n".join(current))
+    return chunks or [""]
+
+
+def _build_consolidated_message(pending: list[tuple[str, pd.Series]], cfg: dict) -> dict:
+    from collections import defaultdict
+
+    grouped: dict[str, list[pd.Series]] = defaultdict(list)
+    for _, row in pending:
+        site = str(row.get("site", "other")).lower()
+        grouped[site].append(row)
+
+    locations = ", ".join(cfg["search_locations"])
+    count = len(pending)
+
+    embeds: list[dict] = [
+        {
+            "title": "📋 New Job Digest",
+            "description": (
+                f"**{count}** new role{'s' if count != 1 else ''} matched your filters.\n\n"
+                f"📍 **Locations:** {locations}\n"
+                f"⏱️ **Window:** last {cfg['hours_old']} hours\n"
+                f"👇 **Tap any bold title below to open & apply**"
+            ),
+            "color": 0x5865F2,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    ]
+
+    job_index = 1
+    site_sections: list[tuple[str, str, int]] = []
+
+    ordered_sites = [s for s in SITE_ORDER if s in grouped]
+    ordered_sites.extend(s for s in grouped if s not in SITE_ORDER)
+
+    for site in ordered_sites:
+        rows = grouped[site]
+        lines = []
+        for row in rows:
+            lines.append(_format_job_line(job_index, row, _hours_ago_label(row)))
+            job_index += 1
+        site_sections.append((site, "\n\n".join(lines), len(rows)))
+
+    remaining_slots = MAX_EMBEDS_PER_MESSAGE - 1
+
+    if len(site_sections) <= remaining_slots:
+        for site, body, row_count in site_sections:
+            emoji = SOURCE_EMOJI.get(site, "📌")
+            label = SITE_LABELS.get(site, site.replace("_", " ").title())
+            embeds.append(
+                {
+                    "title": f"{emoji} {label} · {row_count} listing{'s' if row_count != 1 else ''}",
+                    "description": body[:MAX_EMBED_DESCRIPTION],
+                    "color": SOURCE_COLORS.get(site, 0x5865F2),
+                }
+            )
+    else:
+        combined_blocks = []
+        for site, body, row_count in site_sections:
+            emoji = SOURCE_EMOJI.get(site, "📌")
+            label = SITE_LABELS.get(site, site.replace("_", " ").title())
+            combined_blocks.append(
+                f"{emoji} **{label}** · {row_count} listing{'s' if row_count != 1 else ''}\n{body}"
+            )
+        chunks = _split_blocks(combined_blocks, MAX_EMBED_DESCRIPTION)
+        for idx, chunk in enumerate(chunks[:remaining_slots], start=1):
+            embeds.append(
+                {
+                    "title": f"📑 Listings ({idx}/{min(len(chunks), remaining_slots)})",
+                    "description": chunk,
+                    "color": 0x57F287,
+                }
+            )
+
+    embeds[-1]["footer"] = {"text": f"{count} jobs total · Links open the listing or hiring post"}
+    return {"embeds": embeds[:MAX_EMBEDS_PER_MESSAGE]}
 
 
 def _should_skip(row, title_keywords: list[str]) -> bool:
@@ -349,7 +473,7 @@ def run_digest() -> int:
         logger.info("Scrape returned zero jobs — nothing to post.")
         return 0
 
-    pending: list[tuple[str, dict]] = []
+    pending: list[tuple[str, pd.Series]] = []
 
     for _, row in jobs.iterrows():
         if len(pending) >= cfg["results_wanted"]:
@@ -361,57 +485,18 @@ def run_digest() -> int:
         if not dedup_key or dedup_key in posted_ids:
             continue
 
-        pending.append((dedup_key, _job_embed(row, _hours_ago_label(row))))
+        pending.append((dedup_key, row))
 
     if not pending:
         logger.info("No new jobs this run — all listings were already posted.")
         return 0
 
-    locations_label = ", ".join(cfg["search_locations"])
-    sources_label = ", ".join(SITE_LABELS.get(s, s) for s in cfg["job_sites"])
-    if cfg["scrape_linkedin_posts"]:
-        sources_label += ", LinkedIn Posts"
-
-    header = {
-        "embeds": [
-            {
-                "title": "New job listings",
-                "description": (
-                    f"**{len(pending)}** new listing{'s' if len(pending) != 1 else ''} "
-                    f"({locations_label} · last {cfg['hours_old']}h)\n"
-                    f"Sources: {sources_label}"
-                ),
-                "color": 0x57F287,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "footer": {"text": "Tap a role title or Apply link to open the listing"},
-            }
-        ]
-    }
-    _send_message(cfg["token"], cfg["channel_id"], header)
-
-    batch: list[dict] = []
-    for dedup_key, embed in pending:
+    for dedup_key, _ in pending:
         new_ids.add(dedup_key)
-        batch.append(embed)
 
-        if len(batch) == 10:
-            _send_message(cfg["token"], cfg["channel_id"], {"embeds": batch})
-            batch = []
-            time.sleep(1.2)
-
-    if batch:
-        _send_message(cfg["token"], cfg["channel_id"], {"embeds": batch})
-
+    payload = _build_consolidated_message(pending, cfg)
+    _send_message(cfg["token"], cfg["channel_id"], payload)
     _save_posted_ids(new_ids)
 
-    summary = {
-        "embeds": [
-            {
-                "description": f"Posted **{len(pending)}** new job{'s' if len(pending) != 1 else ''}.",
-                "color": 0x57F287,
-            }
-        ]
-    }
-    _send_message(cfg["token"], cfg["channel_id"], summary)
-    logger.info("Digest finished — posted %s new jobs.", len(pending))
+    logger.info("Digest finished — posted %s new jobs in one message.", len(pending))
     return len(pending)
