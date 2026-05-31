@@ -1,13 +1,14 @@
 beautifulsoup4==4.12.3
 certifi==2024.8.30
 charset-normalizer==3.4.0
+ddgs>=9.0.0
 idna==3.10
 markdownify==0.13.1
 numpy==1.26.3
 pandas==2.2.3
 python-dateutil==2.9.0.post0
 python-dotenv==1.0.1
-python-jobspy==1.1.75
+python-jobspy>=1.1.82
 pytz==2024.2
 regex==2024.11.6
 requests==2.32.3

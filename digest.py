@@ -10,11 +10,36 @@ import requests
 from dotenv import load_dotenv
 from jobspy import scrape_jobs
 
+from linkedin_posts import fetch_hiring_posts
+
 load_dotenv()
 
 logger = logging.getLogger("job_digest")
 POSTED_JOBS_FILE = Path(os.getenv("POSTED_JOBS_FILE", "posted_jobs.json"))
 DISCORD_API = "https://discord.com/api/v10"
+
+# All JobSpy boards. BDJobs excluded — broken in current JobSpy release.
+DEFAULT_JOB_SITES = [
+    "linkedin",
+    "indeed",
+    "naukri",
+    "glassdoor",
+    "google",
+    "zip_recruiter",
+    "bayt",
+]
+
+SITE_LABELS = {
+    "linkedin": "LinkedIn",
+    "indeed": "Indeed",
+    "naukri": "Naukri",
+    "glassdoor": "Glassdoor",
+    "google": "Google Jobs",
+    "zip_recruiter": "ZipRecruiter",
+    "bayt": "Bayt",
+    "bdjobs": "BDJobs",
+    "linkedin_post": "LinkedIn Post",
+}
 
 blacklist_companies = {
     "Team Remotely Inc",
@@ -61,6 +86,11 @@ def _env(name: str, default: str) -> str:
     return value.strip() if value and value.strip() else default
 
 
+def _parse_bool(name: str, default: bool) -> bool:
+    raw = _env(name, "true" if default else "false").lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _parse_int(name: str, default: int) -> int:
     raw = _env(name, str(default))
     try:
@@ -99,6 +129,8 @@ def _config() -> dict:
         "TITLE_KEYWORDS",
         "|".join(search_terms),
     )
+    job_sites = _parse_list("JOB_SITES", "JOB_SITES", "|".join(DEFAULT_JOB_SITES))
+    job_sites = [site.lower() for site in job_sites if site.lower() != "bdjobs"]
 
     return {
         "token": token,
@@ -106,8 +138,13 @@ def _config() -> dict:
         "search_terms": search_terms,
         "search_locations": search_locations,
         "title_keywords": [kw.lower() for kw in title_keywords],
+        "job_sites": job_sites,
+        "country_indeed": _env("COUNTRY_INDEED", "India"),
         "results_wanted": _parse_int("RESULTS_WANTED", 50),
         "hours_old": _parse_int("HOURS_OLD", 6),
+        "scrape_linkedin_posts": _parse_bool("SCRAPE_LINKEDIN_POSTS", True),
+        "linkedin_posts_max": _parse_int("LINKEDIN_POSTS_MAX", 15),
+        "linkedin_fetch_description": _parse_bool("LINKEDIN_FETCH_DESCRIPTION", True),
     }
 
 
@@ -147,27 +184,57 @@ def _hours_ago_label(row) -> str:
             return f"{hours} hrs ago"
         days = hours // 24
         return f"{days} day{'s' if days != 1 else ''} ago"
+    if str(row.get("site", "")) == "linkedin_post":
+        return "recent post"
     return "recently"
+
+
+def _site_label(row) -> str:
+    site = str(row.get("site", "unknown")).lower()
+    return SITE_LABELS.get(site, site.replace("_", " ").title())
+
+
+def _best_url(row) -> str:
+    for key in ("job_url_direct", "job_url", "company_url_direct", "company_url"):
+        value = row.get(key)
+        if value and str(value).startswith("http"):
+            return str(value)
+    return ""
+
+
+def _dedup_key(row) -> str:
+    site = str(row.get("site", "unknown")).lower()
+    job_id = str(row.get("id", "")).strip()
+    if job_id:
+        return f"{site}:{job_id}"
+    url = _best_url(row)
+    if url:
+        return f"{site}:{url}"
+    return ""
 
 
 def _job_embed(row, hours_label: str) -> dict:
     title = str(row.get("title", "Unknown role"))[:256]
     company = str(row.get("company", "Unknown company"))[:256]
-    job_url = str(row.get("job_url", ""))
+    job_url = _best_url(row)
     job_id = str(row.get("id", "N/A"))[:256]
+    source = _site_label(row)
 
     embed = {
         "title": title,
-        "color": 0x5865F2,
+        "color": 0x0A66C2 if source.startswith("LinkedIn") else 0x5865F2,
         "fields": [
+            {"name": "Source", "value": source, "inline": True},
             {"name": "Company", "value": company, "inline": True},
-            {"name": "Job ID", "value": job_id, "inline": True},
             {"name": "Posted", "value": hours_label, "inline": True},
         ],
     }
+    if job_id and job_id != "N/A":
+        embed["fields"].insert(2, {"name": "Job ID", "value": job_id, "inline": True})
     if job_url:
         embed["url"] = job_url
-        embed["fields"].append({"name": "Apply", "value": f"[Open listing]({job_url})", "inline": False})
+        link_label = "Open post" if source == "LinkedIn Post" else "Open listing"
+        embed["fields"].append({"name": "Apply", "value": f"[{link_label}]({job_url})", "inline": False})
     return embed
 
 
@@ -176,7 +243,7 @@ def _should_skip(row, title_keywords: list[str]) -> bool:
     title = str(row.get("title", "")).lower()
     if company in blacklist_companies:
         return True
-    if any(term in title for term in bad_roles):
+    if str(row.get("site", "")) != "linkedin_post" and any(term in title for term in bad_roles):
         return True
     if title_keywords and not any(keyword in title for keyword in title_keywords):
         return True
@@ -190,36 +257,79 @@ def _discord_headers(token: str) -> dict:
 def _send_message(token: str, channel_id: str, payload: dict) -> None:
     url = f"{DISCORD_API}/channels/{channel_id}/messages"
     response = requests.post(url, headers=_discord_headers(token), json=payload, timeout=30)
+    if response.status_code == 404:
+        raise RuntimeError(
+            "Discord channel not found (404). Use the Channel ID (right-click the #channel), not the Server ID."
+        )
     if response.status_code >= 400:
         raise RuntimeError(f"Discord API error {response.status_code}: {response.text}")
 
 
-def scrape_jobs_for_digest(cfg: dict) -> pd.DataFrame:
+def _per_site_results(cfg: dict) -> int:
+    query_count = max(
+        1,
+        len(cfg["search_terms"]) * len(cfg["search_locations"]),
+    )
+    return max(3, min(8, cfg["results_wanted"] // query_count))
+
+
+def _scrape_job_boards(cfg: dict) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
-    query_count = len(cfg["search_terms"]) * len(cfg["search_locations"])
-    per_query = max(5, cfg["results_wanted"] // max(query_count, 1))
+    per_site = _per_site_results(cfg)
+    sites = cfg["job_sites"]
 
     for term in cfg["search_terms"]:
         for location in cfg["search_locations"]:
-            logger.info("Scraping '%s' in '%s'...", term, location)
-            batch = scrape_jobs(
-                site_name=["linkedin"],
-                search_term=term,
-                location=location,
-                results_wanted=per_query,
-                hours_old=cfg["hours_old"],
-            )
-            if not batch.empty:
-                frames.append(batch)
-            time.sleep(0.5)
+            logger.info("Scraping %s for '%s' in '%s'...", ", ".join(sites), term, location)
+            try:
+                batch = scrape_jobs(
+                    site_name=sites,
+                    search_term=term,
+                    google_search_term=f"{term} jobs {location} India",
+                    location=location,
+                    results_wanted=per_site,
+                    hours_old=cfg["hours_old"],
+                    country_indeed=cfg["country_indeed"],
+                    linkedin_fetch_description=cfg["linkedin_fetch_description"],
+                    verbose=0,
+                )
+                if not batch.empty:
+                    frames.append(batch)
+            except Exception as exc:
+                logger.warning("Job board scrape failed for '%s' / '%s': %s", term, location, exc)
+            time.sleep(1)
 
     if not frames:
         return pd.DataFrame()
 
     combined = pd.concat(frames, ignore_index=True)
-    if "id" in combined.columns:
-        combined = combined.drop_duplicates(subset=["id"])
-    return combined
+    combined["dedup_key"] = combined.apply(_dedup_key, axis=1)
+    return combined.drop_duplicates(subset=["dedup_key"], keep="first")
+
+
+def _scrape_all_sources(cfg: dict) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+
+    jobs = _scrape_job_boards(cfg)
+    if not jobs.empty:
+        frames.append(jobs)
+
+    if cfg["scrape_linkedin_posts"]:
+        posts = fetch_hiring_posts(
+            cfg["search_terms"],
+            cfg["search_locations"],
+            max_results=cfg["linkedin_posts_max"],
+        )
+        if not posts.empty:
+            frames.append(posts)
+
+    if not frames:
+        return pd.DataFrame()
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined["dedup_key"] = combined.apply(_dedup_key, axis=1)
+    combined = combined[combined["dedup_key"].astype(bool)]
+    return combined.drop_duplicates(subset=["dedup_key"], keep="first")
 
 
 def run_digest() -> int:
@@ -229,11 +339,11 @@ def run_digest() -> int:
     new_ids = set(posted_ids)
 
     logger.info(
-        "Scraping %s terms across %s locations...",
-        len(cfg["search_terms"]),
-        len(cfg["search_locations"]),
+        "Sources: %s job boards%s",
+        ", ".join(cfg["job_sites"]),
+        " + LinkedIn posts" if cfg["scrape_linkedin_posts"] else "",
     )
-    jobs = scrape_jobs_for_digest(cfg)
+    jobs = _scrape_all_sources(cfg)
 
     if jobs.empty:
         logger.info("Scrape returned zero jobs — nothing to post.")
@@ -247,24 +357,29 @@ def run_digest() -> int:
         if _should_skip(row, cfg["title_keywords"]):
             continue
 
-        job_id = str(row.get("id", ""))
-        if not job_id or job_id in posted_ids:
+        dedup_key = _dedup_key(row)
+        if not dedup_key or dedup_key in posted_ids:
             continue
 
-        pending.append((job_id, _job_embed(row, _hours_ago_label(row))))
+        pending.append((dedup_key, _job_embed(row, _hours_ago_label(row))))
 
     if not pending:
         logger.info("No new jobs this run — all listings were already posted.")
         return 0
 
     locations_label = ", ".join(cfg["search_locations"])
+    sources_label = ", ".join(SITE_LABELS.get(s, s) for s in cfg["job_sites"])
+    if cfg["scrape_linkedin_posts"]:
+        sources_label += ", LinkedIn Posts"
+
     header = {
         "embeds": [
             {
                 "title": "New job listings",
                 "description": (
-                    f"**{len(pending)}** new listing{'s' if len(pending) != 1 else ''} from LinkedIn "
-                    f"({locations_label} · last {cfg['hours_old']}h)"
+                    f"**{len(pending)}** new listing{'s' if len(pending) != 1 else ''} "
+                    f"({locations_label} · last {cfg['hours_old']}h)\n"
+                    f"Sources: {sources_label}"
                 ),
                 "color": 0x57F287,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -275,8 +390,8 @@ def run_digest() -> int:
     _send_message(cfg["token"], cfg["channel_id"], header)
 
     batch: list[dict] = []
-    for job_id, embed in pending:
-        new_ids.add(job_id)
+    for dedup_key, embed in pending:
+        new_ids.add(dedup_key)
         batch.append(embed)
 
         if len(batch) == 10:

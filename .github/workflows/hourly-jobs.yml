@@ -9,6 +9,7 @@ on:
 jobs:
   post-jobs:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -31,6 +32,10 @@ jobs:
           SEARCH_TERMS: ${{ vars.SEARCH_TERMS }}
           SEARCH_LOCATIONS: ${{ vars.SEARCH_LOCATIONS }}
           TITLE_KEYWORDS: ${{ vars.TITLE_KEYWORDS }}
+          JOB_SITES: ${{ vars.JOB_SITES }}
+          COUNTRY_INDEED: ${{ vars.COUNTRY_INDEED }}
+          SCRAPE_LINKEDIN_POSTS: ${{ vars.SCRAPE_LINKEDIN_POSTS }}
+          LINKEDIN_POSTS_MAX: ${{ vars.LINKEDIN_POSTS_MAX }}
           RESULTS_WANTED: ${{ vars.RESULTS_WANTED }}
           HOURS_OLD: ${{ vars.HOURS_OLD }}
         run: python post_jobs.py
