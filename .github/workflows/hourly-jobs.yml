@@ -2,8 +2,8 @@ name: Job Digest
 
 on:
   schedule:
-    # Every 6 hours at :00 UTC (00:00, 06:00, 12:00, 18:00)
-    - cron: "0 */6 * * *"
+    # Daily at 7:00 PM IST (13:30 UTC). GitHub Actions cron is UTC.
+    - cron: "30 13 * * *"
   workflow_dispatch:
 
 jobs:

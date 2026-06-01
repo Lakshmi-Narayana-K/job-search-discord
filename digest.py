@@ -4,6 +4,7 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote_plus
 
 import pandas as pd
 import requests
@@ -76,6 +77,9 @@ SITE_ORDER = [
 
 MAX_EMBED_DESCRIPTION = 3900
 MAX_EMBEDS_PER_MESSAGE = 10
+MAX_EMBED_TOTAL = 6000
+MAX_MESSAGE_CONTENT = 2000
+DISCORD_MAX_FIELDS = 25
 
 blacklist_companies = {
     "Team Remotely Inc",
@@ -167,6 +171,8 @@ def _config() -> dict:
     )
     job_sites = _parse_list("JOB_SITES", "JOB_SITES", "|".join(DEFAULT_JOB_SITES))
     job_sites = [site.lower() for site in job_sites if site.lower() != "bdjobs"]
+    manual_sites = _parse_list("MANUAL_SITES", "MANUAL_SITES", "naukri,glassdoor,zip_recruiter")
+    manual_sites = [site.lower() for site in manual_sites]
 
     return {
         "token": token,
@@ -175,6 +181,7 @@ def _config() -> dict:
         "search_locations": search_locations,
         "title_keywords": [kw.lower() for kw in title_keywords],
         "job_sites": job_sites,
+        "manual_sites": manual_sites,
         "country_indeed": _env("COUNTRY_INDEED", "India"),
         "results_wanted": _parse_int("RESULTS_WANTED", 50),
         "hours_old": _parse_int("HOURS_OLD", 6),
@@ -288,6 +295,117 @@ def _split_blocks(blocks: list[str], max_len: int) -> list[str]:
     return chunks or [""]
 
 
+def _manual_search_blocks(cfg: dict, sites: list[str]) -> list[str]:
+    """
+    Build "manual search" blocks for sources we won't scrape automatically.
+    We intentionally use Google "site:" queries to avoid relying on unstable,
+    captcha-protected endpoints.
+    """
+    blocks: list[str] = []
+    if not sites:
+        return blocks
+
+    site_domains = {
+        "naukri": "naukri.com",
+        "glassdoor": "glassdoor.co.in",
+        "zip_recruiter": "ziprecruiter.com",
+        "ziprecruiter": "ziprecruiter.com",
+    }
+
+    for raw_site in sites:
+        site = raw_site.lower()
+        domain = site_domains.get(site, "")
+        label = SITE_LABELS.get(site, site.replace("_", " ").title())
+        emoji = SOURCE_EMOJI.get(site, "🧭")
+
+        for term in cfg["search_terms"]:
+            for location in cfg["search_locations"]:
+                query = f"{term} {location} jobs"
+                if domain:
+                    query = f"site:{domain} {query}"
+                url = f"https://www.google.com/search?q={quote_plus(query)}"
+                blocks.append(f"{emoji} **{label}** · {term} · {location}\n{url}")
+
+    return blocks
+
+
+def _embed_total_chars(embed: dict) -> int:
+    """
+    Discord validates embed size as the sum of (roughly) all user-visible string
+    fields (title/description/fields/footer/author, etc.). Keep a safety margin
+    to avoid hard failures.
+    """
+
+    def _len(value) -> int:
+        return len(value) if isinstance(value, str) else 0
+
+    total = 0
+    total += _len(embed.get("title"))
+    total += _len(embed.get("description"))
+
+    author = embed.get("author") or {}
+    if isinstance(author, dict):
+        total += _len(author.get("name"))
+
+    footer = embed.get("footer") or {}
+    if isinstance(footer, dict):
+        total += _len(footer.get("text"))
+
+    fields = embed.get("fields") or []
+    if isinstance(fields, list):
+        for field in fields[:DISCORD_MAX_FIELDS]:
+            if not isinstance(field, dict):
+                continue
+            total += _len(field.get("name"))
+            total += _len(field.get("value"))
+    return total
+
+
+def _clamp_embed(embed: dict, *, max_total: int = MAX_EMBED_TOTAL) -> dict:
+    """
+    Ensure a single embed is within Discord limits.
+    We only shrink description as that's where digests grow.
+    """
+    embed = dict(embed)
+    desc = embed.get("description")
+    if not isinstance(desc, str):
+        return embed
+
+    # Leave some headroom for Discord-side counting quirks / future footer text.
+    safety = 64
+    while _embed_total_chars(embed) > (max_total - safety) and embed.get("description"):
+        over = _embed_total_chars(embed) - (max_total - safety)
+        # Reduce more than strictly necessary to avoid many loops.
+        cut = max(over + 128, 256)
+        new_len = max(0, len(embed["description"]) - cut)
+        embed["description"] = embed["description"][:new_len].rstrip()
+        if new_len > 0:
+            embed["description"] = embed["description"][:-1] + "…"
+        else:
+            embed["description"] = "…"
+    return embed
+
+
+def _split_payload_into_messages(payload: dict) -> list[dict]:
+    """
+    Discord allows up to 10 embeds per message. If we generate more than that,
+    split into multiple messages while keeping each embed within limits.
+    """
+    embeds = payload.get("embeds") or []
+    if not isinstance(embeds, list) or not embeds:
+        # Keep API shape stable.
+        content = payload.get("content")
+        if isinstance(content, str) and len(content) > MAX_MESSAGE_CONTENT:
+            content = _truncate(content, MAX_MESSAGE_CONTENT)
+        return [{"content": content} if content else {}]
+
+    clamped = [_clamp_embed(e) if isinstance(e, dict) else e for e in embeds]
+    messages: list[dict] = []
+    for i in range(0, len(clamped), MAX_EMBEDS_PER_MESSAGE):
+        messages.append({"embeds": clamped[i : i + MAX_EMBEDS_PER_MESSAGE]})
+    return messages
+
+
 def _build_consolidated_message(pending: list[tuple[str, pd.Series]], cfg: dict) -> dict:
     from collections import defaultdict
 
@@ -312,6 +430,27 @@ def _build_consolidated_message(pending: list[tuple[str, pd.Series]], cfg: dict)
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
     ]
+
+    manual_sites = [s for s in cfg.get("manual_sites", []) if s in cfg.get("job_sites", [])]
+    if manual_sites:
+        manual_blocks = _manual_search_blocks(cfg, manual_sites)
+        manual_chunks = _split_blocks(manual_blocks, MAX_EMBED_DESCRIPTION)
+        embeds.append(
+            {
+                "title": "🧭 Manual sources (click to search)",
+                "description": manual_chunks[0][:MAX_EMBED_DESCRIPTION],
+                "color": 0xFEE75C,
+            }
+        )
+        # Keep this bounded so we don't crowd out job listing embeds.
+        for idx, chunk in enumerate(manual_chunks[1:3], start=2):
+            embeds.append(
+                {
+                    "title": f"🧭 Manual sources (page {idx})",
+                    "description": chunk[:MAX_EMBED_DESCRIPTION],
+                    "color": 0xFEE75C,
+                }
+            )
 
     job_index = 1
     site_sections: list[tuple[str, str, int]] = []
@@ -359,7 +498,7 @@ def _build_consolidated_message(pending: list[tuple[str, pd.Series]], cfg: dict)
             )
 
     embeds[-1]["footer"] = {"text": f"{count} jobs total · Links open the listing or hiring post"}
-    return {"embeds": embeds[:MAX_EMBEDS_PER_MESSAGE]}
+    return {"embeds": embeds}
 
 
 def _should_skip(row, title_keywords: list[str]) -> bool:
@@ -380,13 +519,29 @@ def _discord_headers(token: str) -> dict:
 
 def _send_message(token: str, channel_id: str, payload: dict) -> None:
     url = f"{DISCORD_API}/channels/{channel_id}/messages"
-    response = requests.post(url, headers=_discord_headers(token), json=payload, timeout=30)
-    if response.status_code == 404:
-        raise RuntimeError(
-            "Discord channel not found (404). Use the Channel ID (right-click the #channel), not the Server ID."
-        )
-    if response.status_code >= 400:
-        raise RuntimeError(f"Discord API error {response.status_code}: {response.text}")
+    # Split big payloads into multiple Discord messages and clamp embeds so we
+    # never hard-fail on size limits.
+    messages = _split_payload_into_messages(payload)
+    for msg in messages:
+        attempts = 0
+        while True:
+            attempts += 1
+            response = requests.post(url, headers=_discord_headers(token), json=msg, timeout=30)
+            if response.status_code == 429 and attempts <= 5:
+                try:
+                    retry_after = float(response.json().get("retry_after", 1.0))
+                except Exception:
+                    retry_after = 1.0
+                time.sleep(max(0.5, retry_after))
+                continue
+
+            if response.status_code == 404:
+                raise RuntimeError(
+                    "Discord channel not found (404). Use the Channel ID (right-click the #channel), not the Server ID."
+                )
+            if response.status_code >= 400:
+                raise RuntimeError(f"Discord API error {response.status_code}: {response.text}")
+            break
 
 
 def _per_site_results(cfg: dict) -> int:
@@ -400,12 +555,15 @@ def _per_site_results(cfg: dict) -> int:
 def _scrape_job_boards(cfg: dict) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
     per_site = _per_site_results(cfg)
-    sites = cfg["job_sites"]
+    manual_sites = set(s.lower() for s in cfg.get("manual_sites", []))
+    sites = [s for s in cfg["job_sites"] if s.lower() not in manual_sites]
 
     for term in cfg["search_terms"]:
         for location in cfg["search_locations"]:
             logger.info("Scraping %s for '%s' in '%s'...", ", ".join(sites), term, location)
             try:
+                if not sites:
+                    continue
                 batch = scrape_jobs(
                     site_name=sites,
                     search_term=term,
@@ -498,5 +656,5 @@ def run_digest() -> int:
     _send_message(cfg["token"], cfg["channel_id"], payload)
     _save_posted_ids(new_ids)
 
-    logger.info("Digest finished — posted %s new jobs in one message.", len(pending))
+    logger.info("Digest finished — posted %s new jobs.", len(pending))
     return len(pending)
