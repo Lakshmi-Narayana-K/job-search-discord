@@ -364,25 +364,50 @@ def _embed_total_chars(embed: dict) -> int:
 def _clamp_embed(embed: dict, *, max_total: int = MAX_EMBED_TOTAL) -> dict:
     """
     Ensure a single embed is within Discord limits.
-    We only shrink description as that's where digests grow.
+    Prefer shrinking description; if still too large, trim footer/title too.
     """
     embed = dict(embed)
-    desc = embed.get("description")
-    if not isinstance(desc, str):
-        return embed
+    # Leave some headroom for Discord-side counting quirks.
+    safety = 128
+    limit = max_total - safety
 
-    # Leave some headroom for Discord-side counting quirks / future footer text.
-    safety = 64
-    while _embed_total_chars(embed) > (max_total - safety) and embed.get("description"):
-        over = _embed_total_chars(embed) - (max_total - safety)
-        # Reduce more than strictly necessary to avoid many loops.
-        cut = max(over + 128, 256)
-        new_len = max(0, len(embed["description"]) - cut)
-        embed["description"] = embed["description"][:new_len].rstrip()
-        if new_len > 0:
-            embed["description"] = embed["description"][:-1] + "…"
-        else:
-            embed["description"] = "…"
+    def _shrink_field(key: str, min_len: int = 1) -> bool:
+        value = embed.get(key)
+        if not isinstance(value, str) or not value:
+            return False
+        # Cut in bigger steps to avoid many loops.
+        over = max(_embed_total_chars(embed) - limit, 0)
+        cut = max(over + 256, 512)
+        new_len = max(min_len, len(value) - cut)
+        embed[key] = value[:new_len].rstrip()
+        if len(embed[key]) > 1:
+            embed[key] = embed[key][:-1] + "…"
+        return True
+
+    # First, shrink description (the main contributor).
+    while _embed_total_chars(embed) > limit and isinstance(embed.get("description"), str) and embed.get("description"):
+        if not _shrink_field("description"):
+            break
+
+    # If still oversized, shrink footer text.
+    footer = embed.get("footer")
+    while _embed_total_chars(embed) > limit and isinstance(footer, dict) and isinstance(footer.get("text"), str) and footer.get("text"):
+        txt = footer["text"]
+        over = max(_embed_total_chars(embed) - limit, 0)
+        cut = max(over + 256, 512)
+        new_len = max(1, len(txt) - cut)
+        footer["text"] = txt[:new_len].rstrip()
+        if len(footer["text"]) > 1:
+            footer["text"] = footer["text"][:-1] + "…"
+        embed["footer"] = footer
+
+    # Finally, shrink title as a last resort.
+    while _embed_total_chars(embed) > limit and isinstance(embed.get("title"), str) and embed.get("title"):
+        if not _shrink_field("title"):
+            break
+
+    if _embed_total_chars(embed) > max_total:
+        logger.warning("Embed still oversized after clamping (%s chars): %s", _embed_total_chars(embed), embed.get("title"))
     return embed
 
 
