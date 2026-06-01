@@ -420,9 +420,13 @@ def _split_payload_into_messages(payload: dict) -> list[dict]:
     if not isinstance(embeds, list) or not embeds:
         # Keep API shape stable.
         content = payload.get("content")
-        if isinstance(content, str) and len(content) > MAX_MESSAGE_CONTENT:
-            content = _truncate(content, MAX_MESSAGE_CONTENT)
-        return [{"content": content} if content else {}]
+        if not isinstance(content, str) or not content.strip():
+            return [{}]
+
+        # Split content into multiple messages (hard limit 2000 chars).
+        blocks = content.split("\n\n")
+        chunks = _split_blocks(blocks, MAX_MESSAGE_CONTENT - 50)
+        return [{"content": chunk} for chunk in chunks if chunk.strip()]
 
     clamped = [_clamp_embed(e) if isinstance(e, dict) else e for e in embeds]
     messages: list[dict] = []
@@ -442,40 +446,24 @@ def _build_consolidated_message(pending: list[tuple[str, pd.Series]], cfg: dict)
     locations = ", ".join(cfg["search_locations"])
     count = len(pending)
 
-    embeds: list[dict] = [
-        {
-            "title": "📋 New Job Digest",
-            "description": (
-                f"**{count}** new role{'s' if count != 1 else ''} matched your filters.\n\n"
-                f"📍 **Locations:** {locations}\n"
-                f"⏱️ **Window:** last {cfg['hours_old']} hours\n"
-                f"👇 **Tap any bold title below to open & apply**"
-            ),
-            "color": 0x5865F2,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-    ]
+    # Use plain content messages (no embeds) to avoid the 6000-char embed cap.
+    # GitHub Actions isn't interactive, so this keeps delivery reliable.
+    header = (
+        f"📋 **New Job Digest**\n"
+        f"**{count}** new role{'s' if count != 1 else ''} matched your filters.\n"
+        f"📍 **Locations:** {locations}\n"
+        f"⏱️ **Window:** last {cfg['hours_old']} hours\n"
+        f"👇 **Tap any bold title below to open & apply**"
+    )
+
+    parts: list[str] = [header]
 
     manual_sites = [s for s in cfg.get("manual_sites", []) if s in cfg.get("job_sites", [])]
     if manual_sites:
         manual_blocks = _manual_search_blocks(cfg, manual_sites)
-        manual_chunks = _split_blocks(manual_blocks, MAX_EMBED_DESCRIPTION)
-        embeds.append(
-            {
-                "title": "🧭 Manual sources (click to search)",
-                "description": manual_chunks[0][:MAX_EMBED_DESCRIPTION],
-                "color": 0xFEE75C,
-            }
-        )
-        # Keep this bounded so we don't crowd out job listing embeds.
-        for idx, chunk in enumerate(manual_chunks[1:3], start=2):
-            embeds.append(
-                {
-                    "title": f"🧭 Manual sources (page {idx})",
-                    "description": chunk[:MAX_EMBED_DESCRIPTION],
-                    "color": 0xFEE75C,
-                }
-            )
+        # Keep manual section bounded; it's optional convenience.
+        manual_blocks = manual_blocks[: min(len(manual_blocks), 18)]
+        parts.append("🧭 **Manual sources (click to search)**\n" + "\n\n".join(manual_blocks))
 
     job_index = 1
     site_sections: list[tuple[str, str, int]] = []
@@ -491,39 +479,14 @@ def _build_consolidated_message(pending: list[tuple[str, pd.Series]], cfg: dict)
             job_index += 1
         site_sections.append((site, "\n\n".join(lines), len(rows)))
 
-    remaining_slots = MAX_EMBEDS_PER_MESSAGE - 1
+    # Append per-site blocks
+    for site, body, row_count in site_sections:
+        emoji = SOURCE_EMOJI.get(site, "📌")
+        label = SITE_LABELS.get(site, site.replace("_", " ").title())
+        parts.append(f"{emoji} **{label}** · {row_count} listing{'s' if row_count != 1 else ''}\n{body}")
 
-    if len(site_sections) <= remaining_slots:
-        for site, body, row_count in site_sections:
-            emoji = SOURCE_EMOJI.get(site, "📌")
-            label = SITE_LABELS.get(site, site.replace("_", " ").title())
-            embeds.append(
-                {
-                    "title": f"{emoji} {label} · {row_count} listing{'s' if row_count != 1 else ''}",
-                    "description": body[:MAX_EMBED_DESCRIPTION],
-                    "color": SOURCE_COLORS.get(site, 0x5865F2),
-                }
-            )
-    else:
-        combined_blocks = []
-        for site, body, row_count in site_sections:
-            emoji = SOURCE_EMOJI.get(site, "📌")
-            label = SITE_LABELS.get(site, site.replace("_", " ").title())
-            combined_blocks.append(
-                f"{emoji} **{label}** · {row_count} listing{'s' if row_count != 1 else ''}\n{body}"
-            )
-        chunks = _split_blocks(combined_blocks, MAX_EMBED_DESCRIPTION)
-        for idx, chunk in enumerate(chunks[:remaining_slots], start=1):
-            embeds.append(
-                {
-                    "title": f"📑 Listings ({idx}/{min(len(chunks), remaining_slots)})",
-                    "description": chunk,
-                    "color": 0x57F287,
-                }
-            )
-
-    embeds[-1]["footer"] = {"text": f"{count} jobs total · Links open the listing or hiring post"}
-    return {"embeds": embeds}
+    parts.append(f"✅ **{count} jobs total**")
+    return {"content": "\n\n".join(parts)}
 
 
 def _should_skip(row, title_keywords: list[str]) -> bool:
