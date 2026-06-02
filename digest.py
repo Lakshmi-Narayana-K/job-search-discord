@@ -184,7 +184,7 @@ def _config() -> dict:
         "manual_sites": manual_sites,
         "country_indeed": _env("COUNTRY_INDEED", "India"),
         "results_wanted": _parse_int("RESULTS_WANTED", 50),
-        "hours_old": _parse_int("HOURS_OLD", 6),
+        "hours_old": _parse_int("HOURS_OLD", 24),
         "scrape_linkedin_posts": _parse_bool("SCRAPE_LINKEDIN_POSTS", True),
         "linkedin_posts_max": _parse_int("LINKEDIN_POSTS_MAX", 15),
         "linkedin_fetch_description": _parse_bool("LINKEDIN_FETCH_DESCRIPTION", True),

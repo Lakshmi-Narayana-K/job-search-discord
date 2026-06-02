@@ -1,6 +1,6 @@
 # Job Fetcher — Discord Job Digest
 
-Scrapes jobs from **multiple job boards** plus **LinkedIn hiring posts**, and posts new listings to your Discord channel every 6 hours via **GitHub Actions**.
+Scrapes jobs from **multiple job boards** plus **LinkedIn hiring posts**, and posts new listings to your Discord channel **once daily at 7 PM IST** via **GitHub Actions**.
 
 ## Sources
 
@@ -27,7 +27,7 @@ This is not the same as your personal LinkedIn feed (that requires login). It fi
 ## How it works
 
 ```
-Every 6 hours → GitHub Actions runs
+Every day at 7 PM IST → GitHub Actions runs
        ↓
 Scrape all job boards (LinkedIn, Indeed, Naukri, …)
        ↓
@@ -39,6 +39,20 @@ Post new jobs to Discord
 ```
 
 **No duplicates:** each listing is tracked by `site:job_id` in `posted_jobs.json`.
+
+## Schedule (IST)
+
+Runs **once daily at 7:00 PM IST** (`13:30 UTC`).
+
+| Setting | Value |
+|---|---|
+| Cron | `30 13 * * *` |
+| IST time | **7:00 PM** every day |
+| Scrape window | Last **24 hours** (`HOURS_OLD=24`) |
+
+GitHub may delay the run by a few minutes on the free tier — seeing **7:05–7:30 PM** is normal.
+
+You can still trigger manually anytime: **Actions → Job Digest → Run workflow**.
 
 ## Setup
 
@@ -56,7 +70,7 @@ See previous sections for Discord bot + GitHub secrets (`TOKEN`, `JOBS_CHANNEL_I
 | `SCRAPE_LINKEDIN_POSTS` | `true` |
 | `LINKEDIN_POSTS_MAX` | `15` |
 | `RESULTS_WANTED` | `50` |
-| `HOURS_OLD` | `6` |
+| `HOURS_OLD` | `24` |
 
 ## What gets posted
 
